@@ -1,0 +1,169 @@
+import os
+import pandas as pd
+import numpy as np
+import re
+from google.colab import drive
+import math
+drive.mount('/content/drive')
+os.chdir("/content/drive/MyDrive/量化交易/")
+
+mport yfinance as yf
+import pandas as pd
+import numpy as np
+import ipywidgets as widgets
+from IPython.display import display
+
+# 用於處理輸入的函數
+def run_backtest(short_window, long_window, start_date, end_date):
+    # 假設我們已經有一個包含所有台灣上市櫃公司代碼的 CSV 文件 'taiwan_stock_symbols.xlsx'
+    symbols_df = pd.read_excel('taiwan_stock_symbols.xlsx')
+
+    # 創建一個空的 DataFrame 來存儲所有公司的收盤價資料
+    close_prices = pd.DataFrame()
+
+    # 迴圈遍歷每個股票代碼並抓取資料
+    for symbol in symbols_df['symbol']:
+        try:
+            stock_data = yf.download(symbol, start=start_date, end=end_date)
+            close_prices[symbol] = stock_data['Adj Close']  # 只選擇收盤價
+        except Exception as e:
+            print(f'抓取 {symbol} 收盤價資料時出錯: {e}')
+
+    # 用於存儲每支股票的回測指標和交易記錄
+    backtest_report = []
+    trade_records = []
+
+    # 對每一支股票進行回測
+    for symbol in close_prices.columns:
+        signals = pd.DataFrame(index=close_prices.index)
+
+        # 計算移動平均線
+        signals['short_mavg'] = close_prices[symbol].rolling(window=short_window).mean()
+        signals['long_mavg'] = close_prices[symbol].rolling(window=long_window).mean()
+
+        # 生成買賣信號
+        signals['signal'] = 0.0
+        signals['signal'][long_window:] = np.where(
+            signals['short_mavg'][long_window:] > signals['long_mavg'][long_window:], 1.0, 0.0
+        )
+
+        # 計算買賣持倉信號
+        signals['positions'] = signals['signal'].diff()
+
+        # 初始化持倉紀錄
+        current_holdings = {}
+
+        # 模擬交易過程：當 positions 是 1 時買入，當 positions 是 -1 時賣出
+        for i in range(1, len(signals)):
+            if signals['positions'].iloc[i] == 1.0:
+                current_holdings[symbol] = {
+                    'Buy_Price': close_prices[symbol].iloc[i],
+                    'Buy_Date': signals.index[i]
+                }
+                trade_records.append({
+                    'Stock': symbol,
+                    'Action': 'Buy',
+                    'Date': signals.index[i],
+                    'Price': close_prices[symbol].iloc[i],
+                    'Return': None  # 買入時無法計算回報率
+                })
+            elif signals['positions'].iloc[i] == -1.0 and symbol in current_holdings:
+                buy_price = current_holdings[symbol]['Buy_Price']
+                sell_price = close_prices[symbol].iloc[i]
+                return_rate = (sell_price - buy_price) / buy_price
+
+                trade_records.append({
+                    'Stock': symbol,
+                    'Action': 'Sell',
+                    'Date': signals.index[i],
+                    'Price': sell_price,
+                    'Return': return_rate
+                })
+
+                del current_holdings[symbol]
+
+        # 計算每日回報
+        daily_returns = close_prices[symbol].pct_change()
+
+        # 根據買賣信號計算策略的日回報
+        strategy_returns = signals['positions'].shift(1) * daily_returns
+        strategy_returns.dropna(inplace=True)
+
+        # 累積回報
+        cumulative_returns = (1 + strategy_returns).cumprod() - 1
+
+        # 計算最大回撤
+        rolling_max = cumulative_returns.cummax()
+        drawdown = cumulative_returns - rolling_max
+        max_drawdown = drawdown.min()
+
+        # 計算 Sharpe 比率
+        sharpe_ratio = strategy_returns.mean() / strategy_returns.std() * np.sqrt(252)
+
+        # 計算 Sortino 比率
+        negative_returns = strategy_returns[strategy_returns < 0]
+        downside_deviation = np.sqrt((negative_returns ** 2).mean()) * np.sqrt(252)
+        sortino_ratio = strategy_returns.mean() / downside_deviation if downside_deviation != 0 else np.nan
+
+        cumulative_return_value = cumulative_returns.iloc[-1] if not cumulative_returns.empty else np.nan
+
+        # 將結果存儲到回測報告中
+        backtest_report.append({
+            'Stock': symbol,
+            'Cumulative_Return': cumulative_return_value,
+            'Max_Drawdown': max_drawdown,
+            'Sharpe_Ratio': sharpe_ratio,
+            'Sortino_Ratio': sortino_ratio
+        })
+
+    backtest_df = pd.DataFrame(backtest_report)
+    trade_df = pd.DataFrame(trade_records)
+
+    # 顯示回測報告
+    display(backtest_df)
+    display(trade_df)
+
+# 創建輸入框
+short_window_input = widgets.IntText(value=20, description='短期均線:')
+short_window = int(short_window_input.value)
+long_window_input = widgets.IntText(value=60, description='長期均線:')
+long_window = int(long_window_input.value)
+
+start_date_input = widgets.DatePicker(description='開始日期:', value=pd.to_datetime('2024-01-01'))
+end_date_input = widgets.DatePicker(description='結束日期:', value=pd.to_datetime('2024-09-05'))
+run_button = widgets.Button(description='運行回測')
+
+short_window = int(short_window_input.value)
+
+
+# 定義按鈕點擊事件
+def on_button_clicked(b):
+    short_window = short_window_input.value
+    long_window = long_window_input.value
+    start_date = start_date_input.value.strftime('%Y-%m-%d')
+    end_date = end_date_input.value.strftime('%Y-%m-%d')
+    run_backtest(short_window, long_window, start_date, end_date)
+
+# 將按鈕與事件綁定
+run_button.on_click(on_button_clicked)
+
+# 顯示輸入框和按鈕
+display(short_window_input, long_window_input, start_date_input, end_date_input, run_button)
+
+# 批量生成圖表並保存
+for symbol in close_prices.columns:
+    # 確保 short_window 和 long_window 是整數
+    # 重新計算 signals 為每個股票的短期和長期移動平均線
+    signals = pd.DataFrame(index=close_prices.index)
+    signals['short_mavg'] = close_prices[symbol].rolling(window=short_window).mean()
+    signals['long_mavg'] = close_prices[symbol].rolling(window=long_window).mean()
+
+    # 生成買賣信號
+    signals['signal'] = 0.0
+    signals['signal'][long_window:] = np.where(
+        signals['short_mavg'][long_window:] > signals['long_mavg'][long_window:], 1.0, 0.0
+    )
+    signals['positions'] = signals['signal'].diff()
+
+    # 繪圖並保存
+    plot_backtest_results(symbol, close_prices, signals, short_window, long_window)
