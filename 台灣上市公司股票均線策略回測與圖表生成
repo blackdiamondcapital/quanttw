@@ -1,95 +1,96 @@
 import os
 import pandas as pd
 import numpy as np
-import re
-from google.colab import drive
-import math
-drive.mount('/content/drive')
-os.chdir("/content/drive/MyDrive/量化交易/")
-
 import yfinance as yf
-import pandas as pd
-import numpy as np
-import ipywidgets as widgets
-from IPython.display import display
+import matplotlib.pyplot as plt
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+from datetime import datetime
 
-# 用於處理輸入的函數
-def run_backtest(short_window, long_window, start_date, end_date):
-    # 假設我們已經有一個包含所有台灣上市櫃公司代碼的 CSV 文件 'taiwan_stock_symbols.xlsx'
-    symbols_df = pd.read_excel('taiwan_stock_symbols.xlsx')
+# 設定工作目錄（如果需要修改）
+os.chdir("//Mac/Home/Desktop/")
 
-    # 創建一個空的 DataFrame 來存儲所有公司的收盤價資料
+# 回測主函數，加入進度更新功能與交易詳細資料
+def run_backtest(short_window, long_window, start_date, end_date, symbol_file, progress_var, progress_bar):
+    # 讀取包含台灣上市櫃公司代碼的 Excel 文件
+    symbols_df = pd.read_excel(symbol_file)
+    total_symbols = len(symbols_df)
+
+    # 創建空的 DataFrame 來存儲收盤價
     close_prices = pd.DataFrame()
 
-    # 迴圈遍歷每個股票代碼並抓取資料
-    for symbol in symbols_df['symbol']:
+    # 迴圈抓取每支股票的數據
+    for idx, symbol in enumerate(symbols_df['symbol']):
         try:
             stock_data = yf.download(symbol, start=start_date, end=end_date)
-            close_prices[symbol] = stock_data['Adj Close']  # 只選擇收盤價
+            close_prices[symbol] = stock_data['Adj Close']  # 只保存收盤價
         except Exception as e:
-            print(f'抓取 {symbol} 收盤價資料時出錯: {e}')
+            print(f'抓取 {symbol} 收盤價時出錯: {e}')
 
-    # 用於存儲每支股票的回測指標和交易記錄
+        # 更新進度條
+        progress_var.set((idx + 1) / total_symbols * 100)
+        progress_bar.update()
+
+    # 存儲回測報告的列表
     backtest_report = []
-    trade_records = []
+    trades_report = []
 
-    # 對每一支股票進行回測
-    for symbol in close_prices.columns:
+    # 開始回測每支股票
+    for idx, symbol in enumerate(close_prices.columns):
         signals = pd.DataFrame(index=close_prices.index)
 
-        # 計算移動平均線
+        # 計算短期和長期均線
         signals['short_mavg'] = close_prices[symbol].rolling(window=short_window).mean()
         signals['long_mavg'] = close_prices[symbol].rolling(window=long_window).mean()
 
         # 生成買賣信號
         signals['signal'] = 0.0
-        signals['signal'][long_window:] = np.where(
-            signals['short_mavg'][long_window:] > signals['long_mavg'][long_window:], 1.0, 0.0
+        signals['signal'] = np.where(
+            signals['short_mavg'] > signals['long_mavg'], 1.0, 0.0
         )
-
-        # 計算買賣持倉信號
         signals['positions'] = signals['signal'].diff()
 
         # 初始化持倉紀錄
         current_holdings = {}
 
-        # 模擬交易過程：當 positions 是 1 時買入，當 positions 是 -1 時賣出
         for i in range(1, len(signals)):
             if signals['positions'].iloc[i] == 1.0:
+                # 記錄買進資訊
                 current_holdings[symbol] = {
                     'Buy_Price': close_prices[symbol].iloc[i],
                     'Buy_Date': signals.index[i]
                 }
-                trade_records.append({
-                    'Stock': symbol,
-                    'Action': 'Buy',
-                    'Date': signals.index[i],
-                    'Price': close_prices[symbol].iloc[i],
-                    'Return': None  # 買入時無法計算回報率
-                })
             elif signals['positions'].iloc[i] == -1.0 and symbol in current_holdings:
+                # 記錄賣出資訊
                 buy_price = current_holdings[symbol]['Buy_Price']
+                buy_date = current_holdings[symbol]['Buy_Date']
                 sell_price = close_prices[symbol].iloc[i]
+                sell_date = signals.index[i]
                 return_rate = (sell_price - buy_price) / buy_price
-
-                trade_records.append({
+                holding_period = (sell_date - buy_date).days
+                
+                # 儲存交易資料
+                trades_report.append({
                     'Stock': symbol,
-                    'Action': 'Sell',
-                    'Date': signals.index[i],
-                    'Price': sell_price,
-                    'Return': return_rate
+                    'Buy_Date': buy_date,
+                    'Sell_Date': sell_date,
+                    'Buy_Price': buy_price,
+                    'Sell_Price': sell_price,
+                    'Return_Rate': return_rate,
+                    'Holding_Period': holding_period
                 })
 
+                # 清除持倉
                 del current_holdings[symbol]
 
         # 計算每日回報
         daily_returns = close_prices[symbol].pct_change()
 
-        # 根據買賣信號計算策略的日回報
+        # 根據買賣信號計算策略回報
         strategy_returns = signals['positions'].shift(1) * daily_returns
         strategy_returns.dropna(inplace=True)
 
-        # 累積回報
+        # 計算累積回報
         cumulative_returns = (1 + strategy_returns).cumprod() - 1
 
         # 計算最大回撤
@@ -107,7 +108,7 @@ def run_backtest(short_window, long_window, start_date, end_date):
 
         cumulative_return_value = cumulative_returns.iloc[-1] if not cumulative_returns.empty else np.nan
 
-        # 將結果存儲到回測報告中
+        # 將回測結果加入報告
         backtest_report.append({
             'Stock': symbol,
             'Cumulative_Return': cumulative_return_value,
@@ -116,54 +117,116 @@ def run_backtest(short_window, long_window, start_date, end_date):
             'Sortino_Ratio': sortino_ratio
         })
 
+        # 繪製並保存圖表
+        plot_backtest_results(symbol, close_prices, signals, short_window, long_window)
+
+        # 更新進度條
+        progress_var.set((idx + 1) / total_symbols * 100)
+        progress_bar.update()
+
+    # 轉換為 DataFrame 並保存到 Excel 文件
     backtest_df = pd.DataFrame(backtest_report)
-    trade_df = pd.DataFrame(trade_records)
+    trades_df = pd.DataFrame(trades_report)
 
-    # 顯示回測報告
-    display(backtest_df)
-    display(trade_df)
+    # 保存回測報告和交易報告到 Excel
+    with pd.ExcelWriter('backtest_report.xlsx') as writer:
+        backtest_df.to_excel(writer, sheet_name='Backtest Report', index=False)
+        trades_df.to_excel(writer, sheet_name='Trades Report', index=False)
 
-# 創建輸入框
-short_window_input = widgets.IntText(value=20, description='短期均線:')
-short_window = int(short_window_input.value)
-long_window_input = widgets.IntText(value=60, description='長期均線:')
-long_window = int(long_window_input.value)
-
-start_date_input = widgets.DatePicker(description='開始日期:', value=pd.to_datetime('2024-01-01'))
-end_date_input = widgets.DatePicker(description='結束日期:', value=pd.to_datetime('2024-09-05'))
-run_button = widgets.Button(description='運行回測')
-
-short_window = int(short_window_input.value)
+    # 顯示完成訊息
+    messagebox.showinfo("回測完成", "回測結果和交易記錄已保存到 backtest_report.xlsx")
 
 
-# 定義按鈕點擊事件
-def on_button_clicked(b):
-    short_window = short_window_input.value
-    long_window = long_window_input.value
-    start_date = start_date_input.value.strftime('%Y-%m-%d')
-    end_date = end_date_input.value.strftime('%Y-%m-%d')
-    run_backtest(short_window, long_window, start_date, end_date)
+# 繪製並保存圖表的函數
+def plot_backtest_results(symbol, close_prices, signals, short_window, long_window):
+    plt.figure(figsize=(14, 7))
 
-# 將按鈕與事件綁定
-run_button.on_click(on_button_clicked)
+    # 畫出股票收盤價
+    plt.plot(close_prices.index, close_prices[symbol], label=f'{symbol} Price')
 
-# 顯示輸入框和按鈕
-display(short_window_input, long_window_input, start_date_input, end_date_input, run_button)
+    # 畫出短期和長期均線
+    plt.plot(signals.index, signals['short_mavg'], label=f'{short_window}-Day Short MA', alpha=0.7)
+    plt.plot(signals.index, signals['long_mavg'], label=f'{long_window}-Day Long MA', alpha=0.7)
 
-# 批量生成圖表並保存
-for symbol in close_prices.columns:
-    # 確保 short_window 和 long_window 是整數
-    # 重新計算 signals 為每個股票的短期和長期移動平均線
-    signals = pd.DataFrame(index=close_prices.index)
-    signals['short_mavg'] = close_prices[symbol].rolling(window=short_window).mean()
-    signals['long_mavg'] = close_prices[symbol].rolling(window=long_window).mean()
+    # 標出買入和賣出的信號
+    buy_signals = signals[signals['positions'] == 1.0].index
+    sell_signals = signals[signals['positions'] == -1.0].index
 
-    # 生成買賣信號
-    signals['signal'] = 0.0
-    signals['signal'][long_window:] = np.where(
-        signals['short_mavg'][long_window:] > signals['long_mavg'][long_window:], 1.0, 0.0
-    )
-    signals['positions'] = signals['signal'].diff()
+    plt.plot(buy_signals, close_prices[symbol].loc[buy_signals], '^', markersize=10, color='g', lw=0, label='Buy Signal')
+    plt.plot(sell_signals, close_prices[symbol].loc[sell_signals], 'v', markersize=10, color='r', lw=0, label='Sell Signal')
 
-    # 繪圖並保存
-    plot_backtest_results(symbol, close_prices, signals, short_window, long_window)
+    plt.title(f'{symbol} Backtest - {short_window}/{long_window} MA Crossover')
+    plt.xlabel('Date')
+    plt.ylabel('Price')
+    plt.legend()
+    plt.grid()
+
+    # 保存圖表
+    plt.savefig(f'{symbol}_backtest_chart.png')
+    plt.close()
+
+
+# 創建桌面 GUI 應用
+def create_gui():
+    def start_backtest():
+        try:
+            short_window = int(short_window_entry.get())
+            long_window = int(long_window_entry.get())
+            start_date = datetime.strptime(start_date_entry.get(), "%Y-%m-%d").strftime('%Y-%m-%d')
+            end_date = datetime.strptime(end_date_entry.get(), "%Y-%m-%d").strftime('%Y-%m-%d')
+            symbol_file = file_path_entry.get()
+            run_backtest(short_window, long_window, start_date, end_date, symbol_file, progress_var, progress_bar)
+        except Exception as e:
+            messagebox.showerror("錯誤", f"發生錯誤: {e}")
+
+    def select_file():
+        file_path = filedialog.askopenfilename(filetypes=[("Excel files", "*.xlsx")])
+        file_path_entry.delete(0, tk.END)
+        file_path_entry.insert(0, file_path)
+
+    # 創建主窗口
+    root = tk.Tk()
+    root.title("股票回測應用")
+    root.geometry("400x350")
+
+    # 短期均線輸入框
+    tk.Label(root, text="短期均線:").pack()
+    short_window_entry = tk.Entry(root)
+    short_window_entry.pack()
+
+    # 長期均線輸入框
+    tk.Label(root, text="長期均線:").pack()
+    long_window_entry = tk.Entry(root)
+    long_window_entry.pack()
+
+    # 開始日期輸入框
+    tk.Label(root, text="開始日期 (YYYY-MM-DD):").pack()
+    start_date_entry = tk.Entry(root)
+    start_date_entry.pack()
+
+    # 結束日期輸入框
+    tk.Label(root, text="結束日期 (YYYY-MM-DD):").pack()
+    end_date_entry = tk.Entry(root)
+    end_date_entry.pack()
+
+    # 選擇股票代碼文件
+    tk.Label(root, text="選擇股票代碼文件:").pack()
+    file_path_entry = tk.Entry(root)
+    file_path_entry.pack()
+
+    # 創建選擇文件按鈕
+    tk.Button(root, text="選擇文件", command=select_file).pack()
+
+    # 進度條
+    progress_var = tk.DoubleVar()
+    progress_bar = ttk.Progressbar(root, variable=progress_var, maximum=100)
+    progress_bar.pack(pady=10)
+
+    # 開始回測按鈕
+    tk.Button(root, text="開始回測", command=start_backtest).pack()
+
+    # 啟動應用
+    root.mainloop()
+
+# 啟動 GUI 應用
+create_gui()
