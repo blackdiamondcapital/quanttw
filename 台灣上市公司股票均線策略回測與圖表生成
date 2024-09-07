@@ -7,7 +7,7 @@ import math
 drive.mount('/content/drive')
 os.chdir("/content/drive/MyDrive/量化交易/")
 
-mport yfinance as yf
+import yfinance as yf
 import pandas as pd
 import numpy as np
 import ipywidgets as widgets
