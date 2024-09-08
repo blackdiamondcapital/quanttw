@@ -1,7 +1,6 @@
 import os
 import pandas as pd
 import numpy as np
-import re
 import requests
 from bs4 import BeautifulSoup
 import yfinance as yf
@@ -73,7 +72,23 @@ def save_taiwan_stock_symbols():
 
     return filtered_df  # 返回 DataFrame 方便後續操作
 
-# 4. 抓取歷史收盤價數據
+# 4. 計算日、週、月、季的報酬率
+def calculate_returns(data):
+    # 日報酬率
+    daily_return = data.pct_change()
+
+    # 週報酬率
+    weekly_return = data.resample('W').ffill().pct_change()
+
+    # 月報酬率
+    monthly_return = data.resample('M').ffill().pct_change()
+
+    # 季報酬率
+    quarterly_return = data.resample('Q').ffill().pct_change()
+
+    return daily_return, weekly_return, monthly_return, quarterly_return
+
+# 5. 抓取歷史收盤價數據
 def fetch_stock_data(symbols, start_date, end_date):
     close_prices = pd.DataFrame()
 
@@ -90,17 +105,26 @@ def fetch_stock_data(symbols, start_date, end_date):
     close_prices.set_index('Date', inplace=True)  # 設置日期為索引
     return close_prices
 
-# GUI部分
+# 6. GUI部分
 def run_program():
     try:
         all_symbols_df = save_taiwan_stock_symbols()
         symbols = all_symbols_df['symbol'].tolist()
         stock_data = fetch_stock_data(symbols, start_date_entry.get(), end_date_entry.get())
 
+        # 計算日、週、月、季的報酬率
+        daily_return, weekly_return, monthly_return, quarterly_return = calculate_returns(stock_data)
+
+        # 保存數據到不同的Excel Sheet
         file_path = filedialog.asksaveasfilename(defaultextension=".xlsx", filetypes=[("Excel files", "*.xlsx")])
         if file_path:
-            stock_data.to_excel(file_path)
-            messagebox.showinfo("保存成功", f"所有股票的歷史數據已保存到 {file_path}")
+            with pd.ExcelWriter(file_path) as writer:
+                stock_data.to_excel(writer, sheet_name='Stock Data')  # 原始股票數據
+                daily_return.to_excel(writer, sheet_name='Daily Returns')  # 日報酬率
+                weekly_return.to_excel(writer, sheet_name='Weekly Returns')  # 週報酬率
+                monthly_return.to_excel(writer, sheet_name='Monthly Returns')  # 月報酬率
+                quarterly_return.to_excel(writer, sheet_name='Quarterly Returns')  # 季報酬率
+            messagebox.showinfo("保存成功", f"所有股票的數據和報酬率已保存到 {file_path}")
     except Exception as e:
         messagebox.showerror("錯誤", str(e))
 
@@ -122,4 +146,4 @@ fetch_button = Button(root, text="抓取並保存數據", command=run_program)
 fetch_button.grid(row=2, columnspan=2, padx=10, pady=20)
 
 # 啟動GUI主循環
-root.mainloop()
+root.mainloop()  
