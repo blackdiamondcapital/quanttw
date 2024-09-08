@@ -1,0 +1,156 @@
+import os
+import pandas as pd
+import numpy as np
+import requests
+from bs4 import BeautifulSoup
+import yfinance as yf
+
+# 1. 抓取台灣上市公司代碼
+def fetch_twse_symbols():
+    url = 'https://isin.twse.com.tw/isin/C_public.jsp?strMode=2'
+    response = requests.get(url)
+    response.encoding = 'big5'  # 網頁編碼
+    soup = BeautifulSoup(response.text, 'html.parser')
+    table = soup.find('table', {'class': 'h4'})
+    rows = table.find_all('tr')[1:]  # 跳過表頭
+
+    symbols = []
+    for row in rows:
+        cols = row.find_all('td')
+        if len(cols) > 1 and cols[0].text.strip():
+            code_name = cols[0].text.strip().split()
+            if len(code_name) == 2 and code_name[0].isdigit():
+                symbols.append({
+                    'symbol': code_name[0] + '.TW',  # 加上 Yahoo Finance 的後綴
+                    'name': code_name[1]
+                })
+    return symbols
+
+# 2. 抓取台灣櫃檯買賣公司代碼
+def fetch_otc_symbols():
+    url = 'https://isin.twse.com.tw/isin/C_public.jsp?strMode=4'
+    response = requests.get(url)
+    response.encoding = 'big5'  # 網頁編碼
+    soup = BeautifulSoup(response.text, 'html.parser')
+    table = soup.find('table', {'class': 'h4'})
+    rows = table.find_all('tr')[1:]  # 跳過表頭
+
+    symbols = []
+    for row in rows:
+        cols = row.find_all('td')
+        if len(cols) > 1 and cols[0].text.strip():
+            code_name = cols[0].text.strip().split()
+            if len(code_name) == 2 and code_name[0].isdigit():
+                symbols.append({
+                    'symbol': code_name[0] + '.TWO',  # 加上 Yahoo Finance 的後綴
+                    'name': code_name[1]
+                })
+    return symbols
+
+# 3. 合併上市和櫃檯買賣公司代碼並保存
+def save_taiwan_stock_symbols():
+    # 抓取上市公司代碼
+    twse_symbols = fetch_twse_symbols()
+    twse_df = pd.DataFrame(twse_symbols)
+
+    # 抓取櫃檯買賣公司代碼
+    otc_symbols = fetch_otc_symbols()
+    otc_df = pd.DataFrame(otc_symbols)
+
+    # 合併兩者
+    all_symbols_df = pd.concat([twse_df, otc_df], ignore_index=True)
+    filtered_df = all_symbols_df[~all_symbols_df['name'].str.contains('購')]  # 過濾不需要的股票名稱
+
+    # 保存為 Excel 文件
+    file_path = '台灣股票代碼.xlsx'  # 可以修改為需要的文件名
+    filtered_df.to_excel(file_path, index=False)
+    print(f"台灣上市櫃公司的股票代碼已經保存到 {file_path}")
+
+    return filtered_df  # 返回 DataFrame 方便後續操作
+
+# 4. 計算日、週、月、季的報酬率，並返回最近一期的前五名和後五名股票
+def calculate_returns(data):
+    # 日報酬率
+    daily_return = data.pct_change()
+
+    # 週報酬率
+    weekly_return = data.resample('W').ffill().pct_change()
+
+    # 月報酬率
+    monthly_return = data.resample('M').ffill().pct_change()
+
+    # 季報酬率
+    quarterly_return = data.resample('Q').ffill().pct_change()
+
+    # 分別找出日、週、月、季報酬率中最後一行（最近一期）的正負前五名股票
+    daily_top5, daily_bottom5 = get_top_and_bottom_returns(daily_return)
+    weekly_top5, weekly_bottom5 = get_top_and_bottom_returns(weekly_return)
+    monthly_top5, monthly_bottom5 = get_top_and_bottom_returns(monthly_return)
+    quarterly_top5, quarterly_bottom5 = get_top_and_bottom_returns(quarterly_return)
+
+    # 打印或顯示結果
+    print_results("日報酬率", daily_top5, daily_bottom5)
+    print_results("週報酬率", weekly_top5, weekly_bottom5)
+    print_results("月報酬率", monthly_top5, monthly_bottom5)
+    print_results("季報酬率", quarterly_top5, quarterly_bottom5)
+
+    return daily_return, weekly_return, monthly_return, quarterly_return
+
+# 5. 查找最近一期的正負前五名股票
+def get_top_and_bottom_returns(returns):
+    # 選取最近一期的報酬率
+    last_period = returns.iloc[-1]
+    # 排序並找出前五名和後五名
+    top5 = last_period.nlargest(5)
+    bottom5 = last_period.nsmallest(5)
+    return top5, bottom5
+
+# 6. 顯示結果
+def print_results(label, top5, bottom5):
+    print(f"\n{label} - 正前五名股票：")
+    print(top5)
+    print(f"{label} - 負前五名股票：")
+    print(bottom5)
+
+# 7. 抓取歷史收盤價數據
+def fetch_stock_data(symbols, start_date, end_date):
+    close_prices = pd.DataFrame()
+
+    for symbol in symbols:
+        try:
+            stock_data = yf.download(symbol, start=start_date, end=end_date)
+            if close_prices.empty:
+                close_prices['Date'] = stock_data.index  # 抓取第一個股票的日期作為主時間列
+            close_prices[symbol] = stock_data['Adj Close'].values
+            print(f'{symbol} 的數據已成功抓取。')
+        except Exception as e:
+            print(f'抓取 {symbol} 的數據時出現錯誤: {e}')
+
+    close_prices.set_index('Date', inplace=True)  # 設置日期為索引
+    return close_prices
+
+# 主程序
+if __name__ == "__main__":
+    # 保存台灣股票代碼
+    all_symbols_df = save_taiwan_stock_symbols()
+    symbols = all_symbols_df['symbol'].tolist()
+
+    # 設定日期範圍
+    start_date = '2023-01-01'  # 可以修改為需要的開始日期
+    end_date = '2024-01-01'  # 可以修改為需要的結束日期
+
+    # 抓取股票數據
+    stock_data = fetch_stock_data(symbols, start_date, end_date)
+
+    # 計算報酬率
+    daily_return, weekly_return, monthly_return, quarterly_return = calculate_returns(stock_data)
+
+    # 保存數據到不同的Excel Sheet
+    file_path = '股票數據和報酬率.xlsx'  # 可以修改為需要的文件名
+    with pd.ExcelWriter(file_path) as writer:
+        stock_data.to_excel(writer, sheet_name='Stock Data')  # 原始股票數據
+        daily_return.to_excel(writer, sheet_name='Daily Returns')  # 日報酬率
+        weekly_return.to_excel(writer, sheet_name='Weekly Returns')  # 週報酬率
+        monthly_return.to_excel(writer, sheet_name='Monthly Returns')  # 月報酬率
+        quarterly_return.to_excel(writer, sheet_name='Quarterly Returns')  # 季報酬率
+    print(f"所有股票的數據和報酬率已保存到 {file_path}")  
