@@ -1,0 +1,125 @@
+import os
+import pandas as pd
+import numpy as np
+import re
+import requests
+from bs4 import BeautifulSoup
+import yfinance as yf
+from tkinter import *
+from tkinter import filedialog, messagebox
+from tkinter import ttk
+
+# 1. 抓取台灣上市公司代碼
+def fetch_twse_symbols():
+    url = 'https://isin.twse.com.tw/isin/C_public.jsp?strMode=2'
+    response = requests.get(url)
+    response.encoding = 'big5'  # 網頁編碼
+    soup = BeautifulSoup(response.text, 'html.parser')
+    table = soup.find('table', {'class': 'h4'})
+    rows = table.find_all('tr')[1:]  # 跳過表頭
+
+    symbols = []
+    for row in rows:
+        cols = row.find_all('td')
+        if len(cols) > 1 and cols[0].text.strip():
+            code_name = cols[0].text.strip().split()
+            if len(code_name) == 2 and code_name[0].isdigit():
+                symbols.append({
+                    'symbol': code_name[0] + '.TW',  # 加上 Yahoo Finance 的後綴
+                    'name': code_name[1]
+                })
+    return symbols
+
+# 2. 抓取台灣櫃檯買賣公司代碼
+def fetch_otc_symbols():
+    url = 'https://isin.twse.com.tw/isin/C_public.jsp?strMode=4'
+    response = requests.get(url)
+    response.encoding = 'big5'  # 網頁編碼
+    soup = BeautifulSoup(response.text, 'html.parser')
+    table = soup.find('table', {'class': 'h4'})
+    rows = table.find_all('tr')[1:]  # 跳過表頭
+
+    symbols = []
+    for row in rows:
+        cols = row.find_all('td')
+        if len(cols) > 1 and cols[0].text.strip():
+            code_name = cols[0].text.strip().split()
+            if len(code_name) == 2 and code_name[0].isdigit():
+                symbols.append({
+                    'symbol': code_name[0] + '.TWO',  # 加上 Yahoo Finance 的後綴
+                    'name': code_name[1]
+                })
+    return symbols
+
+# 3. 合併上市和櫃檯買賣公司代碼並保存
+def save_taiwan_stock_symbols():
+    # 抓取上市公司代碼
+    twse_symbols = fetch_twse_symbols()
+    twse_df = pd.DataFrame(twse_symbols)
+
+    # 抓取櫃檯買賣公司代碼
+    otc_symbols = fetch_otc_symbols()
+    otc_df = pd.DataFrame(otc_symbols)
+
+    # 合併兩者
+    all_symbols_df = pd.concat([twse_df, otc_df], ignore_index=True)
+    filtered_df = all_symbols_df[~all_symbols_df['name'].str.contains('購')]  # 過濾不需要的股票名稱
+
+    # 保存為 Excel 文件
+    file_path = filedialog.asksaveasfilename(defaultextension=".xlsx", filetypes=[("Excel files", "*.xlsx")])
+    if file_path:
+        filtered_df.to_excel(file_path, index=False)
+        messagebox.showinfo("保存成功", f"台灣上市櫃公司的股票代碼已經保存到 {file_path}")
+
+    return filtered_df  # 返回 DataFrame 方便後續操作
+
+# 4. 抓取歷史收盤價數據
+def fetch_stock_data(symbols, start_date, end_date):
+    close_prices = pd.DataFrame()
+
+    for symbol in symbols:
+        try:
+            stock_data = yf.download(symbol, start=start_date, end=end_date)
+            if close_prices.empty:
+                close_prices['Date'] = stock_data.index  # 抓取第一個股票的日期作為主時間列
+            close_prices[symbol] = stock_data['Adj Close'].values
+            print(f'{symbol} 的數據已成功抓取。')
+        except Exception as e:
+            print(f'抓取 {symbol} 的數據時出現錯誤: {e}')
+
+    close_prices.set_index('Date', inplace=True)  # 設置日期為索引
+    return close_prices
+
+# GUI部分
+def run_program():
+    try:
+        all_symbols_df = save_taiwan_stock_symbols()
+        symbols = all_symbols_df['symbol'].tolist()
+        stock_data = fetch_stock_data(symbols, start_date_entry.get(), end_date_entry.get())
+
+        file_path = filedialog.asksaveasfilename(defaultextension=".xlsx", filetypes=[("Excel files", "*.xlsx")])
+        if file_path:
+            stock_data.to_excel(file_path)
+            messagebox.showinfo("保存成功", f"所有股票的歷史數據已保存到 {file_path}")
+    except Exception as e:
+        messagebox.showerror("錯誤", str(e))
+
+# 設置主視窗
+root = Tk()
+root.title("台灣股票數據抓取工具")
+
+# 標籤和輸入框
+Label(root, text="開始日期 (YYYY-MM-DD):").grid(row=0, column=0, padx=10, pady=10)
+start_date_entry = Entry(root)
+start_date_entry.grid(row=0, column=1, padx=10, pady=10)
+
+Label(root, text="結束日期 (YYYY-MM-DD):").grid(row=1, column=0, padx=10, pady=10)
+end_date_entry = Entry(root)
+end_date_entry.grid(row=1, column=1, padx=10, pady=10)
+
+# 按鈕
+fetch_button = Button(root, text="抓取並保存數據", command=run_program)
+fetch_button.grid(row=2, columnspan=2, padx=10, pady=20)
+
+# 啟動GUI主循環
+root.mainloop()
