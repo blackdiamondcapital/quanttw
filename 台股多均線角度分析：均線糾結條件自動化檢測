@@ -1,0 +1,158 @@
+import pandas as pd
+import yfinance as yf
+import requests
+from bs4 import BeautifulSoup
+import time
+import numpy as np
+import os
+from google.colab import drive
+
+# 連接 Google Drive（在 Colab 上使用）
+drive.mount('/content/drive')
+os.chdir("/content/drive/MyDrive/量化交易/")
+
+def fetch_symbols(url, suffix):
+    response = requests.get(url)
+    response.encoding = 'big5'
+    soup = BeautifulSoup(response.text, 'html.parser')
+    table = soup.find('table', {'class': 'h4'})
+    rows = table.find_all('tr')[1:]
+
+    symbols = []
+    for row in rows:
+        cols = row.find_all('td')
+        if len(cols) > 1 and cols[0].text.strip():
+            code_name = cols[0].text.strip().split()
+            if len(code_name) == 2 and code_name[0].isdigit():
+                symbols.append({
+                    'symbol': code_name[0] + suffix,
+                    'name': code_name[1]
+                })
+    return symbols
+
+# 1. 抓取台灣上市公司代碼
+twse_symbols = fetch_symbols('https://isin.twse.com.tw/isin/C_public.jsp?strMode=2', '.TW')
+
+# 2. 抓取台灣櫃檯買賣公司代碼
+otc_symbols = fetch_symbols('https://isin.twse.com.tw/isin/C_public.jsp?strMode=4', '.TWO')
+
+# 3. 合併上市和櫃檯買賣公司代碼並返回
+twse_df = pd.DataFrame(twse_symbols)
+otc_df = pd.DataFrame(otc_symbols)
+
+all_symbols_df = pd.concat([twse_df, otc_df], ignore_index=True)
+filtered_df = all_symbols_df[~all_symbols_df['name'].str.contains('購')]
+
+symbols_list = filtered_df['symbol'].tolist()[:10]  # 只取前10檔股票
+
+# 4. 抓取歷史收盤價數據
+start_date = '2024-01-01'
+end_date = '2024-09-06'
+close_prices = pd.DataFrame()
+
+for symbol in symbols_list:
+    retry_count = 0
+    while retry_count < 3:
+        try:
+            stock_data = yf.download(symbol, start=start_date, end=end_date)
+
+            if stock_data.empty:
+                print(f'{symbol} 在指定日期範圍內沒有有效數據，跳過該股票。')
+                break
+
+            # 如果有有效數據，將其加入 DataFrame
+            close_prices[symbol] = stock_data['Close']
+            print(f'{symbol} 的數據已成功抓取。')
+            break
+        except Exception as e:
+            retry_count += 1
+            print(f'抓取 {symbol} 的數據時出現錯誤: {e}. 嘗試重試 {retry_count} 次')
+            time.sleep(5)  # 延遲幾秒再重試
+
+# 檢查是否有數據被成功抓取
+if not close_prices.empty:
+    close_prices.dropna(axis=1, how='all', inplace=True)  # 移除所有數據為 NaN 的股票
+    print(f'成功抓取的股票數據: {close_prices.columns.tolist()}')
+else:
+    print('未能抓取任何股價數據。')
+
+# 5. 計算均線
+moving_averages = pd.DataFrame(index=close_prices.index)
+windows = [5, 10, 20]  # 可以調整為其他時間窗口
+for window in windows:
+    for symbol in close_prices.columns:
+        sma = close_prices[symbol].rolling(window=window).mean()
+        moving_averages[f'{symbol}_SMA_{window}'] = sma
+
+print(moving_averages.head())  # 印出前幾行以檢查均線數值
+
+# 6. 計算均線的斜率和角度
+def calculate_angle(slope):
+    return np.degrees(np.arctan(slope))
+
+def angle_from_series(series):
+    series = series.dropna()  # 移除 NaN 值
+    if len(series) > 1:
+        x = np.arange(len(series))
+        slope, _ = np.polyfit(x, series, 1)
+        return calculate_angle(slope)
+    return np.nan
+
+# 按日期計算均線角度，這裡選擇窗口大小為 20，根據需要可以調整
+window_size = 20
+angles_df = pd.DataFrame(index=moving_averages.index)
+for col in moving_averages.columns:
+    angles_df[col] = moving_averages[col].rolling(window=window_size).apply(angle_from_series)
+
+print(angles_df.head())  # 打印前幾行以檢查結果
+
+# 7. 計算相同股票不同均線之間的角度差異
+angle_differences = {}
+
+# 遍歷每個股票的均線
+for symbol in close_prices.columns:
+    ma_columns = [f'{symbol}_SMA_{window}' for window in windows]
+    
+    # 比較同一股票不同均線之間的角度差異
+    for i, col1 in enumerate(ma_columns):
+        for col2 in ma_columns[i+1:]:
+            angle_diff = angles_df[col1] - angles_df[col2]
+            angle_differences[f'{col1}_vs_{col2}'] = angle_diff
+
+# 將結果存儲在 DataFrame 中
+angle_differences_df = pd.DataFrame(angle_differences)
+
+# 8. 定義均線糾結條件
+convergence_df = pd.DataFrame(index=angles_df.index)
+
+# 檢查均線角度和角度差異是否都小於 15 度
+for symbol in close_prices.columns:
+    ma_columns = [f'{symbol}_SMA_{window}' for window in windows]
+    
+    # 條件1：同一支股票的所有均線角度是否小於 1 度
+    angle_check = angles_df[ma_columns].apply(lambda x: all(abs(x) < 1), axis=1)
+    
+    # 條件2：不同均線的角度差異是否小於 15 度
+    angle_diff_check = pd.Series(True, index=angle_check.index)
+    for i, col1 in enumerate(ma_columns):
+        for col2 in ma_columns[i+1:]:
+            angle_diff_check &= abs(angles_df[col1] - angles_df[col2]) < 3
+    
+    # 合併條件，只有當所有條件都滿足時，判定為均線糾結
+    convergence_df[symbol] = angle_check & angle_diff_check
+
+# 9. 匯出均線角度與糾結結果到 Excel
+with pd.ExcelWriter('ma_results_with_convergence.xlsx') as writer:
+    # 匯出均線角度
+    if not angles_df.empty:
+        angles_df.to_excel(writer, sheet_name='Moving_Averages_Angles')
+    
+    # 匯出相同股票不同均線的角度差異
+    if not angle_differences_df.empty:
+        angle_differences_df.to_excel(writer, sheet_name='Angle_Differences')
+    
+    # 匯出均線糾結結果
+    if not convergence_df.empty:
+        convergence_df.to_excel(writer, sheet_name='Convergence_Results')
+
+print('結果已保存到 ma_results_with_convergence.xlsx')
