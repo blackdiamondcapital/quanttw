@@ -1,0 +1,189 @@
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
+from PyPDF2 import PdfMerger
+import numpy as np
+import pandas as pd
+import yfinance as yf
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_pdf import PdfPages
+
+# Download Taiwan Semiconductor (TSMC) stock data
+symbol = '2330.TW'
+start_date = '2023-01-01'
+end_date = '2024-01-01'
+data = yf.download(symbol, start=start_date, end=end_date)
+
+# Strategy information
+strategy_name = "Moving Average Crossover Strategy (Short-term vs Long-term)"
+short_window = 5  # Short-term moving average period
+long_window = 20  # Long-term moving average period
+
+# Calculate short-term and long-term moving averages
+data['Short_MA'] = data['Adj Close'].rolling(window=short_window, min_periods=1).mean()
+data['Long_MA'] = data['Adj Close'].rolling(window=long_window, min_periods=1).mean()
+
+# Initialize position, cash, portfolio values, and signals
+initial_cash = 1000000
+cash = initial_cash
+position = 0  # 0 means no position, 1 means holding
+portfolio_values = [initial_cash]  # Daily portfolio value
+trades = []  # List of trades
+buy_signals = []  # Buy signal times and prices
+sell_signals = []  # Sell signal times and prices
+
+# Simulate the trading strategy
+for i in range(1, len(data)):
+    if data['Short_MA'][i] > data['Long_MA'][i] and position == 0:  # Buy signal
+        position = cash / data['Adj Close'][i]
+        cash = 0
+        trades.append(('Buy', data.index[i], data['Adj Close'][i]))
+        buy_signals.append((data.index[i], data['Short_MA'][i]))  # Record buy signal
+    elif data['Short_MA'][i] < data['Long_MA'][i] and position > 0:  # Sell signal
+        cash = position * data['Adj Close'][i]
+        position = 0
+        trades.append(('Sell', data.index[i], data['Adj Close'][i]))
+        sell_signals.append((data.index[i], data['Long_MA'][i]))  # Record sell signal
+    
+    # Calculate daily portfolio value
+    portfolio_value = cash + position * data['Adj Close'][i]
+    portfolio_values.append(portfolio_value)
+
+# Ensure portfolio_values length matches data length
+assert len(portfolio_values) == len(data), "Portfolio value length mismatch."
+
+# Add portfolio values to DataFrame
+data['Portfolio Value'] = portfolio_values
+
+# Calculate performance metrics
+cumulative_return = (data['Portfolio Value'][-1] / initial_cash) - 1
+print(f"Cumulative Return: {cumulative_return:.2%}")
+
+# Max Drawdown
+data['Cumulative Max'] = data['Portfolio Value'].cummax()
+data['Drawdown'] = (data['Portfolio Value'] - data['Cumulative Max']) / data['Cumulative Max']
+max_drawdown = data['Drawdown'].min()
+print(f"Max Drawdown: {max_drawdown:.2%}")
+
+# Annualized Return
+trading_days = len(data)
+annualized_return = (1 + cumulative_return) ** (252 / trading_days) - 1
+print(f"Annualized Return: {annualized_return:.2%}")
+
+# Daily Return
+data['Daily Return'] = data['Portfolio Value'].pct_change()
+
+# Sharpe Ratio
+risk_free_rate = 0.01 / 252  # Assuming risk-free rate of 1% annually
+excess_daily_return = data['Daily Return'] - risk_free_rate
+sharpe_ratio = np.mean(excess_daily_return) / np.std(excess_daily_return) * np.sqrt(252)
+print(f"Sharpe Ratio: {sharpe_ratio:.2f}")
+
+# Print each trade
+for trade in trades:
+    print(f"{trade[0]}: Date {trade[1]} at Price {trade[2]:.2f}")
+
+# Create a PDF report using reportlab
+report_file = "trading_strategy_report_reportlab.pdf"
+c = canvas.Canvas(report_file, pagesize=A4)
+width, height = A4
+
+# Add title and strategy information
+c.setFont("Helvetica-Bold", 20)
+c.drawCentredString(width / 2, height - 50, "Trading Strategy Report")
+
+# Add stock symbol, strategy, and parameter details
+c.setFont("Helvetica", 14)
+c.drawString(100, height - 80, f"Stock Symbol: {symbol}")
+c.drawString(100, height - 100, f"Strategy: {strategy_name}")
+c.drawString(100, height - 120, f"Short-term MA: {short_window} days")
+c.drawString(100, height - 140, f"Long-term MA: {long_window} days")
+
+# Add performance metrics
+c.setFont("Helvetica", 12)
+c.drawString(100, height - 180, f"Cumulative Return: {cumulative_return:.2%}")
+c.drawString(100, height - 200, f"Max Drawdown: {max_drawdown:.2%}")
+c.drawString(100, height - 220, f"Annualized Return: {annualized_return:.2%}")
+c.drawString(100, height - 240, f"Sharpe Ratio: {sharpe_ratio:.2f}")
+
+# Add trade log
+c.drawString(100, height - 280, "Trade Log:")
+y_position = height - 300
+for trade in trades:
+    c.drawString(100, y_position, f"{trade[0]}: Date {trade[1].date()} at Price {trade[2]:.2f}")
+    y_position -= 20
+    if y_position < 50:  # Check for page overflow
+        c.showPage()
+        y_position = height - 50
+
+# Save the PDF
+c.save()
+
+# Save charts using matplotlib
+chart_file = "trading_strategy_report_charts.pdf"
+with PdfPages(chart_file) as pdf:
+    # Chart 1: Closing price with moving averages and buy/sell signals
+    plt.figure(figsize=(12, 8))
+    plt.plot(data.index, data['Adj Close'], label=f'{symbol} Closing Price', color='green')
+    plt.plot(data.index, data['Short_MA'], label=f'Short MA ({short_window} days)', color='blue', linestyle='--')
+    plt.plot(data.index, data['Long_MA'], label=f'Long MA ({long_window} days)', color='red', linestyle='--')
+    if buy_signals:
+        buy_dates, buy_prices = zip(*buy_signals)
+        plt.scatter(buy_dates, buy_prices, marker='^', color='blue', label='Buy Signal', s=100, edgecolors='black')
+    if sell_signals:
+        sell_dates, sell_prices = zip(*sell_signals)
+        plt.scatter(sell_dates, sell_prices, marker='v', color='red', label='Sell Signal', s=100, edgecolors='black')
+    plt.title(f'{symbol} Closing Price with Moving Averages and Buy/Sell Signals')
+    plt.xlabel('Date')
+    plt.ylabel('Price')
+    plt.legend()
+    plt.grid(True)
+    pdf.savefig()  # Save to PDF
+    plt.close()
+
+    # Chart 2: Portfolio value over time
+    plt.figure(figsize=(10, 6))
+    plt.plot(data.index, data['Portfolio Value'], label='Portfolio Value', color='blue')
+    plt.title('Portfolio Value Over Time')
+    plt.xlabel('Date')
+    plt.ylabel('Portfolio Value')
+    plt.grid(True)
+    plt.legend()
+    pdf.savefig()  # Save to PDF
+    plt.close()
+
+    # Chart 3: Max Drawdown
+    plt.figure(figsize=(10, 6))
+    plt.plot(data.index, data['Portfolio Value'], label='Portfolio Value', color='blue')
+    plt.axhline(y=max(portfolio_values) * (1 + max_drawdown), color='r', linestyle='--', label=f"Max Drawdown: {max_drawdown:.2%}")
+    plt.title('Max Drawdown Over Time')
+    plt.xlabel('Date')
+    plt.ylabel('Portfolio Value')
+    plt.grid(True)
+    plt.legend()
+    pdf.savefig()  # Save to PDF
+    plt.close()
+
+    # Chart 4: Cumulative Return
+    plt.figure(figsize=(10, 6))
+    plt.plot(data.index, (data['Portfolio Value'] / initial_cash) - 1, label='Cumulative Return', color='purple')
+    plt.title('Cumulative Return Over Time')
+    plt.xlabel('Date')
+    plt.ylabel('Cumulative Return')
+    plt.grid(True)
+    plt.legend()
+    pdf.savefig()  # Save to PDF
+    plt.close()
+
+# Combine the two PDFs
+combined_file = "trading_strategy_combined_report.pdf"
+merger = PdfMerger()
+
+# Append the report and charts PDFs
+merger.append(report_file)
+merger.append(chart_file)
+
+# Write the combined PDF to a file
+merger.write(combined_file)
+merger.close()
+
+print(f"Combined PDF report has been generated and saved as {combined_file}.")
