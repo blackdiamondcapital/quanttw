@@ -1,0 +1,80 @@
+import numpy as np
+import pandas as pd
+import yfinance as yf
+import matplotlib.pyplot as plt
+
+# 下載台積電股票歷史數據
+symbol = '2330.TW'
+start_date = '2023-01-01'
+end_date = '2024-01-01'
+data = yf.download(symbol, start=start_date, end=end_date)
+
+# 計算短期和長期移動平均線
+short_window = 5
+long_window = 20
+data['Short_MA'] = data['Adj Close'].rolling(window=short_window, min_periods=1).mean()
+data['Long_MA'] = data['Adj Close'].rolling(window=long_window, min_periods=1).mean()
+
+# 初始化倉位、資金、持股狀態
+initial_cash = 1000000
+cash = initial_cash
+position = 0  # 0 表示沒有持股, 1 表示持有
+portfolio_values = [initial_cash]  # 每日的資產價值，首先加入初始現金
+trades = []  # 記錄每筆交易的買入/賣出價格
+buy_signals = []  # 記錄每次買入的時間和價格
+sell_signals = []  # 記錄每次賣出的時間和價格
+
+# 模擬交易策略
+for i in range(1, len(data)):
+    if data['Short_MA'][i] > data['Long_MA'][i] and position == 0:  # 短期均線上穿長期均線 -> 買入
+        position = cash / data['Adj Close'][i]
+        cash = 0
+        trades.append(('買入', data.index[i], data['Short_MA'][i]))  # 使用均線的值作為買入價
+        buy_signals.append((data.index[i], data['Short_MA'][i]))  # 記錄買入信號
+    elif data['Short_MA'][i] < data['Long_MA'][i] and position > 0:  # 短期均線下穿長期均線 -> 賣出
+        cash = position * data['Adj Close'][i]
+        position = 0
+        trades.append(('賣出', data.index[i], data['Long_MA'][i]))  # 使用均線的值作為賣出價
+        sell_signals.append((data.index[i], data['Long_MA'][i]))  # 記錄賣出信號
+    
+    # 計算每日投資組合價值
+    portfolio_value = cash + position * data['Adj Close'][i]
+    portfolio_values.append(portfolio_value)
+
+# 檢查 portfolio_values 和 data 的長度是否一致
+assert len(portfolio_values) == len(data), "投資組合價值數據長度不匹配"
+
+# 將每日的投資組合價值加入 DataFrame
+data['Portfolio Value'] = portfolio_values
+
+# 繪製收盤價走勢圖，並標註買賣信號和均線
+plt.figure(figsize=(12, 8))
+
+# 畫出收盤價
+plt.plot(data.index, data['Adj Close'], label=f'{symbol} Closing Price', color='green')
+
+# 畫出短期均線
+plt.plot(data.index, data['Short_MA'], label=f'Short MA ({short_window} days)', color='blue', linestyle='--')
+
+# 畫出長期均線
+plt.plot(data.index, data['Long_MA'], label=f'Long MA ({long_window} days)', color='red', linestyle='--')
+
+# 標註買入信號，使用均線的值作為信號的顯示位置
+if buy_signals:
+    buy_dates, buy_prices = zip(*buy_signals)
+    plt.scatter(buy_dates, buy_prices, marker='^', color='blue', label='Buy Signal', s=100, edgecolors='black')
+
+# 標註賣出信號，使用均線的值作為信號的顯示位置
+if sell_signals:
+    sell_dates, sell_prices = zip(*sell_signals)
+    plt.scatter(sell_dates, sell_prices, marker='v', color='red', label='Sell Signal', s=100, edgecolors='black')
+
+# 添加圖表標題、標籤和網格
+plt.title(f'{symbol} Closing Price with Moving Averages and Buy/Sell Signals at Crossings')
+plt.xlabel('Date')
+plt.ylabel('Price')
+plt.legend()
+plt.grid(True)
+
+# 顯示圖表
+plt.show()
