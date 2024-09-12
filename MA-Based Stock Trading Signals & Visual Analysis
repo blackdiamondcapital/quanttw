@@ -1,3 +1,73 @@
+# 匯入所需的模組
+import pandas as pd
+import yfinance as yf
+import requests
+from bs4 import BeautifulSoup
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.utils import ImageReader
+import numpy as np
+import os
+import matplotlib.pyplot as plt
+from io import BytesIO
+from google.colab import drive
+
+# 連接 Google Drive（在 Colab 上使用）
+drive.mount('/content/drive')
+os.chdir("/content/drive/MyDrive/量化交易/")
+
+# 1. 抓取台灣上市公司代碼
+def fetch_twse_symbols():
+    url = 'https://isin.twse.com.tw/isin/C_public.jsp?strMode=2'
+    response = requests.get(url)
+    response.encoding = 'big5'
+    soup = BeautifulSoup(response.text, 'html.parser')
+    table = soup.find('table', {'class': 'h4'})
+    rows = table.find_all('tr')[1:]
+
+    symbols = []
+    for row in rows:
+        cols = row.find_all('td')
+        if len(cols) > 1 and cols[0].text.strip():
+            code_name = cols[0].text.strip().split()
+            if len(code_name) == 2 and code_name[0].isdigit():
+                symbols.append({
+                    'symbol': code_name[0] + '.TW',
+                    'name': code_name[1]
+                })
+    return symbols
+
+# 2. 抓取台灣櫃檯買賣公司代碼
+def fetch_otc_symbols():
+    url = 'https://isin.twse.com.tw/isin/C_public.jsp?strMode=4'
+    response = requests.get(url)
+    response.encoding = 'big5'
+    soup = BeautifulSoup(response.text, 'html.parser')
+    table = soup.find('table', {'class': 'h4'})
+    rows = table.find_all('tr')[1:]
+
+    symbols = []
+    for row in rows:
+        cols = row.find_all('td')
+        if len(cols) > 1 and cols[0].text.strip():
+            code_name = cols[0].text.strip().split()
+            if len(code_name) == 2 and code_name[0].isdigit():
+                symbols.append({
+                    'symbol': code_name[0] + '.TWO',
+                    'name': code_name[1]
+                })
+    return symbols
+
+# 3. 合併上市和櫃檯買賣公司代碼
+def fetch_all_taiwan_symbols():
+    twse_symbols = fetch_twse_symbols()
+    otc_symbols = fetch_otc_symbols()
+
+    # 合併上市和櫃檯股票代碼
+    all_symbols_df = pd.DataFrame(twse_symbols + otc_symbols)
+    filtered_df = all_symbols_df[~all_symbols_df['name'].str.contains('購')]  # 過濾掉包含 "購" 的項目
+    return filtered_df
+
 
 # 4. 下載股票數據並進行回測
 def backtest_stock(symbol, start_date, end_date):
