@@ -1,0 +1,298 @@
+# 匯入所需的模組
+import pandas as pd
+import yfinance as yf
+import requests
+from bs4 import BeautifulSoup
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.utils import ImageReader
+import numpy as np
+import os
+import matplotlib.pyplot as plt
+from io import BytesIO
+from google.colab import drive
+
+# 連接 Google Drive（在 Colab 上使用）
+drive.mount('/content/drive')
+os.chdir("/content/drive/MyDrive/量化交易/")
+
+# 1. 抓取台灣上市公司代碼
+def fetch_twse_symbols():
+    url = 'https://isin.twse.com.tw/isin/C_public.jsp?strMode=2'
+    response = requests.get(url)
+    response.encoding = 'big5'
+    soup = BeautifulSoup(response.text, 'html.parser')
+    table = soup.find('table', {'class': 'h4'})
+    rows = table.find_all('tr')[1:]
+
+    symbols = []
+    for row in rows:
+        cols = row.find_all('td')
+        if len(cols) > 1 and cols[0].text.strip():
+            code_name = cols[0].text.strip().split()
+            if len(code_name) == 2 and code_name[0].isdigit():
+                symbols.append({
+                    'symbol': code_name[0] + '.TW',
+                    'name': code_name[1]
+                })
+    return symbols
+
+# 2. 抓取台灣櫃檯買賣公司代碼
+def fetch_otc_symbols():
+    url = 'https://isin.twse.com.tw/isin/C_public.jsp?strMode=4'
+    response = requests.get(url)
+    response.encoding = 'big5'
+    soup = BeautifulSoup(response.text, 'html.parser')
+    table = soup.find('table', {'class': 'h4'})
+    rows = table.find_all('tr')[1:]
+
+    symbols = []
+    for row in rows:
+        cols = row.find_all('td')
+        if len(cols) > 1 and cols[0].text.strip():
+            code_name = cols[0].text.strip().split()
+            if len(code_name) == 2 and code_name[0].isdigit():
+                symbols.append({
+                    'symbol': code_name[0] + '.TWO',
+                    'name': code_name[1]
+                })
+    return symbols
+
+# 3. 合併上市和櫃檯買賣公司代碼
+def fetch_all_taiwan_symbols():
+    twse_symbols = fetch_twse_symbols()
+    otc_symbols = fetch_otc_symbols()
+
+    # 合併上市和櫃檯股票代碼
+    all_symbols_df = pd.DataFrame(twse_symbols + otc_symbols)
+    filtered_df = all_symbols_df[~all_symbols_df['name'].str.contains('購')]  # 過濾掉包含 "購" 的項目
+    return filtered_df
+
+
+# 4. 下載股票數據並進行回測
+def backtest_stock(symbol, start_date, end_date):
+    try:
+        data = yf.download(symbol, start=start_date, end=end_date)
+
+        # 計算短期和長期移動平均線
+        short_window = 5
+        long_window = 20
+        data['Short_MA'] = data['Adj Close'].rolling(window=short_window, min_periods=1).mean()
+        data['Long_MA'] = data['Adj Close'].rolling(window=long_window, min_periods=1).mean()
+
+        # 初始化參數
+        initial_cash = 1000000
+        cash = initial_cash
+        position = 0
+        portfolio_values = [initial_cash]
+        trades = []
+        win_trades = 0
+        lose_trades = 0
+        trade_profits = []
+        buy_signals = []
+        sell_signals = []
+
+        # 模擬交易策略
+        for i in range(1, len(data)):
+            if data['Short_MA'][i] > data['Long_MA'][i] and position == 0:
+                position = cash / data['Adj Close'][i]
+                cash = 0
+                trades.append(('Buy', data.index[i], data['Adj Close'][i]))
+                buy_signals.append((data.index[i], data['Adj Close'][i]))  # 記錄買入信號
+            elif data['Short_MA'][i] < data['Long_MA'][i] and position > 0:
+                cash = position * data['Adj Close'][i]
+                trade_profit = cash - initial_cash
+                trade_profits.append(trade_profit)
+                if trade_profit > 0:
+                    win_trades += 1
+                else:
+                    lose_trades += 1
+                position = 0
+                trades.append(('Sell', data.index[i], data['Adj Close'][i]))
+                sell_signals.append((data.index[i], data['Adj Close'][i]))  # 記錄賣出信號
+
+            portfolio_value = cash + position * data['Adj Close'][i]
+            portfolio_values.append(portfolio_value)
+
+        data['Portfolio Value'] = portfolio_values
+
+        # 繪製收盤價與均線圖，並標註買賣信號
+        plt.figure(figsize=(14, 10))  # 調整圖片比例
+        plt.plot(data.index, data['Adj Close'], label='Closing Price', color='green')
+        plt.plot(data.index, data['Short_MA'], label=f'Short MA ({short_window} days)', color='blue', linestyle='--')
+        plt.plot(data.index, data['Long_MA'], label=f'Long MA ({long_window} days)', color='red', linestyle='--')
+
+        # 標註買賣信號
+        if buy_signals:
+            buy_dates, buy_prices = zip(*buy_signals)
+            plt.scatter(buy_dates, buy_prices, marker='^', color='blue', label='Buy Signal', s=100, edgecolors='black')
+
+        if sell_signals:
+            sell_dates, sell_prices = zip(*sell_signals)
+            plt.scatter(sell_dates, sell_prices, marker='v', color='red', label='Sell Signal', s=100, edgecolors='black')
+
+        plt.title(f'{symbol} Price with Moving Averages and Buy/Sell Signals')
+        plt.legend()
+        plt.grid(True)
+
+        # 儲存圖像為二進制流
+        img_buf = BytesIO()
+        plt.savefig(img_buf, format='png')
+        plt.close()
+        img_buf.seek(0)
+
+        # 計算回測指標
+        cumulative_return = (data['Portfolio Value'][-1] / initial_cash) - 1
+        max_drawdown = -((data['Portfolio Value'].cummax() - data['Portfolio Value']) / data['Portfolio Value'].cummax()).max()
+        annualized_return = (1 + cumulative_return) ** (252 / len(data)) - 1
+        annualized_volatility = data['Portfolio Value'].pct_change().std() * np.sqrt(252)
+        sharpe_ratio = (annualized_return - 0.01) / annualized_volatility if annualized_volatility != 0 else 0
+        sortino_ratio = (annualized_return - 0.01) / (data['Portfolio Value'].pct_change()[data['Portfolio Value'].pct_change() < 0].std() * np.sqrt(252)) if annualized_volatility != 0 else 0
+        win_rate = win_trades / (win_trades + lose_trades) if (win_trades + lose_trades) > 0 else 0
+        profit_loss_ratio = np.mean([x for x in trade_profits if x > 0]) / abs(np.mean([x for x in trade_profits if x < 0])) if len(trade_profits) > 1 else 0
+        calmar_ratio = annualized_return / max_drawdown if max_drawdown != 0 else 0
+        capital_utilization = len(trades) / len(data)
+
+        # 返回指標數據和圖片
+        return {
+            'symbol': symbol,
+            'cumulative_return': cumulative_return,
+            'max_drawdown': max_drawdown,
+            'annualized_return': annualized_return,
+            'sharpe_ratio': sharpe_ratio,
+            'sortino_ratio': sortino_ratio,
+            'win_rate': win_rate,
+            'profit_loss_ratio': profit_loss_ratio,
+            'capital_utilization': capital_utilization,
+            'calmar_ratio': calmar_ratio,
+            'trades': trades,
+            'win_trades': win_trades,
+            'lose_trades': lose_trades,
+            'img_buf': img_buf
+        }
+    except Exception as e:
+        print(f"Error fetching data for {symbol}: {e}")
+        return None
+
+# 5. 生成統一回測報告
+def generate_consolidated_report():
+    symbols_df = fetch_all_taiwan_symbols()
+
+    # 設定回測日期範圍
+    start_date = '2023-01-01'
+    end_date = '2024-01-01'
+
+    # 限制股票數量為前5檔
+    #symbols_df = symbols_df.head(5)
+
+    # 初始化 PDF 報告
+    pdf_report = "consolidated_backtest_report.pdf"
+    c = canvas.Canvas(pdf_report, pagesize=A4)
+    width, height = A4
+
+    consolidated_results = []
+
+    # 逐一回測每支股票並匯總
+    for index, row in symbols_df.iterrows():
+        symbol = row['symbol']
+        name = row['name']
+
+        # 執行回測
+        result = backtest_stock(symbol, start_date, end_date)
+
+        if result is not None:
+            consolidated_results.append(result)
+
+    # 第一頁：統一回測報告頁面
+    c.setFont("Helvetica-Bold", 16)
+    c.drawString(100, height - 50, "Consolidated Backtest Summary")
+    c.setFont("Helvetica", 12)
+
+    # 顯示回測期間與策略名稱
+    c.drawString(100, height - 80, f"Backtest Period: {start_date} to {end_date}")
+    c.drawString(100, height - 100, "Strategy: Moving Average Crossover (Short-term: 5 days, Long-term: 20 days)")
+
+    # 顯示總共回測了多少支股票
+    c.drawString(100, height - 120, f"Total Stocks Analyzed: {len(consolidated_results)}")  # 在這裡顯示股票總數
+
+    # 計算並顯示匯總結果
+    total_cumulative_return = np.mean([res['cumulative_return'] for res in consolidated_results])
+    total_max_drawdown = np.mean([res['max_drawdown'] for res in consolidated_results])
+    total_annualized_return = np.mean([res['annualized_return'] for res in consolidated_results])
+    total_sharpe_ratio = np.mean([res['sharpe_ratio'] for res in consolidated_results])
+    total_sortino_ratio = np.mean([res['sortino_ratio'] for res in consolidated_results])
+    total_win_rate = np.mean([res['win_rate'] for res in consolidated_results])
+    total_profit_loss_ratio = np.mean([res['profit_loss_ratio'] for res in consolidated_results])
+    total_calmar_ratio = np.mean([res['calmar_ratio'] for res in consolidated_results])
+
+    # 在第一頁中顯示平均結果
+    c.drawString(100, height - 150, f"Average Cumulative Return: {total_cumulative_return:.2%}")
+    c.drawString(100, height - 170, f"Average Max Drawdown: {total_max_drawdown:.2%}")
+    c.drawString(100, height - 190, f"Average Annualized Return: {total_annualized_return:.2%}")
+    c.drawString(100, height - 210, f"Average Sharpe Ratio: {total_sharpe_ratio:.2f}")
+    c.drawString(100, height - 230, f"Average Sortino Ratio: {total_sortino_ratio:.2f}")
+    c.drawString(100, height - 250, f"Average Win Rate: {total_win_rate:.2%}")
+    c.drawString(100, height - 270, f"Average Profit/Loss Ratio: {total_profit_loss_ratio:.2f}")
+    c.drawString(100, height - 290, f"Average Calmar Ratio: {total_calmar_ratio:.2f}")
+
+    # 換頁
+    c.showPage()
+
+    # 從第二頁開始顯示每支股票的回測結果
+    for result in consolidated_results:
+        c.setFont("Helvetica-Bold", 14)
+        c.drawString(100, height - 50, f"Backtest Report for {result['symbol']}")
+
+        # 添加交易策略名稱、均線參數和回測期間
+        c.setFont("Helvetica", 12)
+        c.drawString(100, height - 80, "Strategy: Moving Average Crossover (Short-term: 5 days, Long-term: 20 days)")
+        c.drawString(100, height - 100, f"Backtest Period: {start_date} to {end_date}")
+
+        # 回測指標數據
+        c.drawString(100, height - 130, f"Cumulative Return: {result['cumulative_return']:.2%}")
+        c.drawString(100, height - 150, f"Max Drawdown: {result['max_drawdown']:.2%}")
+        c.drawString(100, height - 170, f"Annualized Return: {result['annualized_return']:.2%}")
+        c.drawString(100, height - 190, f"Sharpe Ratio: {result['sharpe_ratio']:.2f}")
+        c.drawString(100, height - 210, f"Sortino Ratio: {result['sortino_ratio']:.2f}")
+        c.drawString(100, height - 230, f"Win Rate: {result['win_rate']:.2%}")
+        c.drawString(100, height - 250, f"Profit/Loss Ratio: {result['profit_loss_ratio']:.2f}")
+        c.drawString(100, height - 270, f"Capital Utilization: {result['capital_utilization']:.2%}")
+        c.drawString(100, height - 290, f"Calmar Ratio: {result['calmar_ratio']:.2f}")
+        c.drawString(100, height - 310, f"Total Trades: {len(result['trades']) // 2}")
+        c.drawString(100, height - 330, f"Winning Trades: {result['win_trades']}")
+        c.drawString(100, height - 350, f"Losing Trades: {result['lose_trades']}")
+
+        # 插入交易紀錄
+        c.setFont("Helvetica-Bold", 12)
+        c.drawString(100, height - 370, "Trade History:")
+        y_position = height - 390
+        for i in range(0, len(result['trades']), 2):  # 每兩個一組
+            if i + 1 < len(result['trades']):
+                # 打印 Buy 記錄
+                trade_buy = result['trades'][i]
+                c.setFont("Helvetica", 10)
+                c.drawString(100, y_position, f"{trade_buy[0]} on {trade_buy[1].strftime('%Y-%m-%d')} at {trade_buy[2]:.2f}")
+                y_position -= 15
+
+                # 打印 Sell 記錄
+                trade_sell = result['trades'][i + 1]
+                c.drawString(100, y_position, f"{trade_sell[0]} on {trade_sell[1].strftime('%Y-%m-%d')} at {trade_sell[2]:.2f}")
+                y_position -= 30  # 每兩個買賣之間多加一點間隔
+
+        # 插入圖像，單獨放在新頁面
+        c.showPage()  # 換頁至圖片
+        img_reader = ImageReader(result['img_buf'])
+        c.drawImage(img_reader, 50, 200, width=500, height=400)  # 調整圖片大小和位置至中間
+        c.showPage()
+
+    # 保存 PDF 報告
+    c.save()
+
+    print(f"Consolidated backtest report saved to {pdf_report}")
+
+# 執行統一回測並生成報告
+generate_consolidated_report()
+merger.write(combined_file)
+merger.close()
+
+print(f"Combined PDF report has been generated and saved as {combined_file}.")
