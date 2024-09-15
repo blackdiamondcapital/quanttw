@@ -1,0 +1,48 @@
+mport psycopg2
+import pandas as pd
+
+# 1. 建立資料庫連接
+def create_db_connection():
+    try:
+        connection = psycopg2.connect(
+            host="localhost",        # 資料庫主機
+            port="5432",             # PostgreSQL 預設端口
+            database="postgres",     # 資料庫名稱
+            user="postgres",         # 使用者名稱
+            password="s8304021"      # 資料庫密碼
+        )
+        print("成功連接到資料庫")
+        return connection
+    except Exception as e:
+        print(f"連接到資料庫時發生錯誤: {e}")
+        return None
+
+# 2. 從資料庫抓取數據並存入 DataFrame
+def fetch_data_from_db():
+    connection = create_db_connection()
+    if not connection:
+        return None
+    
+    query = '''
+    SELECT * FROM stock_prices_extended;
+    '''
+    
+    try:
+        # 使用 pandas 的 read_sql_query 直接從資料庫中查詢並轉換成 DataFrame
+        df = pd.read_sql_query(query, connection)
+        print("成功抓取數據並轉換為 DataFrame")
+        return df
+    except Exception as e:
+        print(f"從資料庫抓取數據時發生錯誤: {e}")
+        return None
+    finally:
+        connection.close()
+
+# 3. 主程式
+if __name__ == "__main__":
+    # 從資料庫中抓取數據並存入 DataFrame
+    df = fetch_data_from_db()
+    
+    # 顯示前幾行數據
+    if df is not None:
+        print(df.head())
