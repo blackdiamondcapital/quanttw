@@ -1,0 +1,151 @@
+import psycopg2
+import pandas as pd
+import yfinance as yf
+import requests
+from bs4 import BeautifulSoup
+
+# 1. 建立資料庫連接
+def create_db_connection():
+    try:
+        connection = psycopg2.connect(
+            host="localhost",        # 資料庫主機
+            port="5432",             # PostgreSQL 預設端口
+            database="postgres",     # 資料庫名稱
+            user="postgres",         # 使用者名稱
+            password="s8304021"      # 資料庫密碼
+        )
+        print("成功連接到資料庫")
+        return connection
+    except Exception as e:
+        print(f"連接到資料庫時發生錯誤: {e}")
+        return None
+
+# 2. 創建股價資料表格
+def create_table(connection):
+    cursor = connection.cursor()
+    create_table_query = '''
+    CREATE TABLE IF NOT EXISTS stock_prices_extended (
+        symbol VARCHAR(10),
+        date DATE,
+        open_price NUMERIC,
+        high_price NUMERIC,
+        low_price NUMERIC,
+        close_price NUMERIC,
+        adj_close_price NUMERIC,
+        volume BIGINT,
+        PRIMARY KEY (symbol, date)
+    );
+    '''
+    cursor.execute(create_table_query)
+    connection.commit()
+    print("新表格創建成功")
+    cursor.close()
+
+# 3. 插入股價數據
+def insert_stock_data(connection, symbol, stock_data):
+    cursor = connection.cursor()
+    insert_query = '''
+    INSERT INTO stock_prices_extended (symbol, date, open_price, high_price, low_price, close_price, adj_close_price, volume) 
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+    ON CONFLICT (symbol, date) DO NOTHING;
+    '''
+    
+    for index, row in stock_data.iterrows():
+        cursor.execute(insert_query, (
+            symbol, 
+            index.date(), 
+            row['Open'], 
+            row['High'], 
+            row['Low'], 
+            row['Close'], 
+            row['Adj Close'], 
+            row['Volume']
+        ))
+    
+    connection.commit()
+    print(f'{symbol} 的數據已成功插入新表格')
+    cursor.close()
+
+# 4. 抓取台灣上市公司代碼
+def fetch_twse_symbols():
+    url = 'https://isin.twse.com.tw/isin/C_public.jsp?strMode=2'
+    response = requests.get(url)
+    response.encoding = 'big5'
+    soup = BeautifulSoup(response.text, 'html.parser')
+    table = soup.find('table', {'class': 'h4'})
+    rows = table.find_all('tr')[1:]
+
+    symbols = []
+    for row in rows:
+        cols = row.find_all('td')
+        if len(cols) > 1 and cols[0].text.strip():
+            code_name = cols[0].text.strip().split()
+            if len(code_name) == 2 and code_name[0].isdigit():
+                symbols.append({
+                    'symbol': code_name[0] + '.TW',
+                    'name': code_name[1]
+                })
+    return symbols
+
+# 5. 抓取台灣櫃檯買賣公司代碼
+def fetch_otc_symbols():
+    url = 'https://isin.twse.com.tw/isin/C_public.jsp?strMode=4'
+    response = requests.get(url)
+    response.encoding = 'big5'
+    soup = BeautifulSoup(response.text, 'html.parser')
+    table = soup.find('table', {'class': 'h4'})
+    rows = table.find_all('tr')[1:]
+
+    symbols = []
+    for row in rows:
+        cols = row.find_all('td')
+        if len(cols) > 1 and cols[0].text.strip():
+            code_name = cols[0].text.strip().split()
+            if len(code_name) == 2 and code_name[0].isdigit():
+                symbols.append({
+                    'symbol': code_name[0] + '.TWO',
+                    'name': code_name[1]
+                })
+    return symbols
+
+# 6. 合併上市和櫃檯買賣公司代碼
+def fetch_all_taiwan_symbols():
+    twse_symbols = fetch_twse_symbols()
+    otc_symbols = fetch_otc_symbols()
+
+    # 合併上市和櫃檯股票代碼
+    all_symbols_df = pd.DataFrame(twse_symbols + otc_symbols)
+    filtered_df = all_symbols_df[~all_symbols_df['name'].str.contains('購')]  # 過濾掉包含 "購" 的項目
+    return filtered_df
+
+# 7. 下載所有股票數據並存入資料庫
+def fetch_and_store_all_taiwan_stock_data(start_date, end_date):
+    connection = create_db_connection()
+    if connection is None:
+        return
+
+    create_table(connection)  # 創建表格
+
+    symbols_df = fetch_all_taiwan_symbols()
+    symbols = symbols_df['symbol'].tolist()
+
+    for symbol in symbols:
+        try:
+            print(f'下載 {symbol} 的數據...')
+            stock_data = yf.download(symbol, start=start_date, end=end_date)
+            if not stock_data.empty:
+                insert_stock_data(connection, symbol, stock_data)
+            else:
+                print(f'{symbol} 沒有可用的數據')
+        except Exception as e:
+            print(f'下載 {symbol} 的數據時出現錯誤: {e}')
+
+    connection.close()
+
+# 8. 主程式
+if __name__ == "__main__":
+    # 下載所有台灣股票資料，並將其存入資料庫
+    start_date = '2010-01-01'  # 開始日期
+    end_date = '2024-09-01'    # 結束日期
+
+    fetch_and_store_all_taiwan_stock_data(start_date, end_date)
