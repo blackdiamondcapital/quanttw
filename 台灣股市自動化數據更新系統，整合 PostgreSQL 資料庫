@@ -1,0 +1,116 @@
+import psycopg2
+import pandas as pd
+import yfinance as yf
+import requests
+from bs4 import BeautifulSoup
+from datetime import datetime, timedelta
+
+# 1. 建立資料庫連接
+def create_db_connection():
+    try:
+        connection = psycopg2.connect(
+            host="localhost",
+            port="5432",
+            database="postgres",
+            user="postgres",
+            password="s8304021"
+        )
+        print("成功連接到資料庫")
+        return connection
+    except Exception as e:
+        print(f"連接到資料庫時發生錯誤: {e}")
+        return None
+
+# 2. 查詢資料庫中的最新日期
+def get_latest_date_for_symbol(connection, symbol):
+    cursor = connection.cursor()
+    query = '''
+    SELECT MAX(date) FROM stock_prices_tw WHERE symbol = %s;
+    '''
+    cursor.execute(query, (symbol,))
+    result = cursor.fetchone()
+    cursor.close()
+    if result[0] is not None:
+        return result[0]  # 返回最新日期
+    else:
+        return None  # 若無數據，返回 None
+
+# 3. 插入股價數據
+def insert_stock_data(connection, symbol, stock_data):
+    cursor = connection.cursor()
+    insert_query = '''
+    INSERT INTO stock_prices_tw (symbol, date, open_price, high_price, low_price, close_price, adj_close_price, volume) 
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+    ON CONFLICT (symbol, date) DO NOTHING;
+    '''
+    
+    for index, row in stock_data.iterrows():
+        cursor.execute(insert_query, (
+            symbol, 
+            index.date(), 
+            row['Open'], 
+            row['High'], 
+            row['Low'], 
+            row['Close'], 
+            row['Adj Close'], 
+            row['Volume']
+        ))
+    
+    connection.commit()
+    print(f'{symbol} 的新數據已成功插入資料庫')
+    cursor.close()
+
+# 4. 抓取股票數據
+def fetch_stock_data(symbol, start_date, end_date):
+    print(f'下載 {symbol} 從 {start_date} 到 {end_date} 的數據...')
+    stock_data = yf.download(symbol, start=start_date, end=end_date)
+    return stock_data
+
+# 5. 抓取台灣上市和櫃檯股票代碼
+def fetch_all_taiwan_symbols():
+    twse_symbols = fetch_twse_symbols()
+    otc_symbols = fetch_otc_symbols()
+    
+    # 合併上市和櫃檯股票代碼
+    all_symbols_df = pd.DataFrame(twse_symbols + otc_symbols)
+    filtered_df = all_symbols_df[~all_symbols_df['name'].str.contains('購')]  # 過濾掉包含 "購" 的項目
+    return filtered_df
+
+# 6. 主程式：抓取新數據並插入資料庫
+def fetch_and_store_new_data_for_all_symbols():
+    connection = create_db_connection()
+    if connection is None:
+        return
+
+    symbols_df = fetch_all_taiwan_symbols()
+    symbols = symbols_df['symbol'].tolist()
+
+    # 設置要抓取的新數據的結束日期為今天
+    end_date = datetime.today().strftime('%Y-%m-%d')
+
+    for symbol in symbols:
+        # 查詢資料庫中的最新日期
+        latest_date = get_latest_date_for_symbol(connection, symbol)
+        
+        # 若該股票已有數據，則從最新日期的下一天開始抓取
+        if latest_date:
+            start_date = (latest_date + timedelta(days=1)).strftime('%Y-%m-%d')
+        else:
+            # 如果沒有數據，從 2010-01-01 開始抓取
+            start_date = '2010-01-01'
+
+        # 只在最新日期之後有需要時抓取新數據
+        if datetime.strptime(start_date, '%Y-%m-%d') < datetime.strptime(end_date, '%Y-%m-%d'):
+            stock_data = fetch_stock_data(symbol, start_date, end_date)
+            if not stock_data.empty:
+                insert_stock_data(connection, symbol, stock_data)
+            else:
+                print(f'{symbol} 沒有可用的新數據')
+        else:
+            print(f'{symbol} 已經是最新數據，無需更新')
+
+    connection.close()
+
+# 7. 主程式
+if __name__ == "__main__":
+    fetch_and_store_new_data_for_all_symbols()
