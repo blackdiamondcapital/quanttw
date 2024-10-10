@@ -151,3 +151,8 @@ if __name__ == "__main__":
     end_date = datetime.today().strftime('%Y-%m-%d')  # 自動獲取今天的日期作為結束日期
 
     fetch_and_store_all_taiwan_stock_data(start_date, end_date)
+
+
+
+
+
