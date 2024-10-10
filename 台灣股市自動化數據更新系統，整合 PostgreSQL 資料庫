@@ -1,3 +1,5 @@
+自動更新資料庫股價資訊到最新日期
+
 import psycopg2
 import pandas as pd
 import yfinance as yf
@@ -13,7 +15,7 @@ def create_db_connection():
             port="5432",
             database="postgres",
             user="postgres",
-            password="s8304021"
+            password="00000000"
         )
         print("成功連接到資料庫")
         return connection
